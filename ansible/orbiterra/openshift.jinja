@@ -1,0 +1,424 @@
+{% import 'helpers-common.jinja' as common %}
+
+{% set zonesplit = properties["zone"].split('-') %}
+{% set region = zonesplit[0] + "-" + zonesplit[1] %}
+
+{% set network = env["deployment"] + "-network" %}
+{% set subnet0 = env["deployment"] + "-subnet0" %}
+
+
+{% set vminfra = common.GenerateUniqueName( 'vm', env['deployment'], 'infra' ) %}
+{% set vmmaster = common.GenerateUniqueName( 'vm', env['deployment'], 'master' ) %}
+{% set vmnfs = common.GenerateUniqueName( 'vm', env['deployment'], 'nfs' ) %}
+{% set vmnode1 = common.GenerateUniqueName( 'vm', env['deployment'], 'node1' ) %}
+{% set vmnode2 = common.GenerateUniqueName( 'vm', env['deployment'], 'node2' ) %}
+
+{% set diskinfra = common.GenerateUniqueName( 'disk', env['deployment'], 'infra-docker' ) %}
+{% set diskmaster = common.GenerateUniqueName( 'disk', env['deployment'], 'master-docker' ) %}
+
+{% set dnszone = 'gcp-testdrive-openshift-com' %}
+{% set configName = env["deployment"] + "-startup-config" %}
+{% set waiterName = env["deployment"] + "-startup-waiter" %}
+
+{% set dnsdeploymentpart = env["deployment"][-3:] %}
+
+resources:
+
+{# NETWORK #}
+
+- name: {{ network }}
+  type: compute.v1.network
+  properties:
+    autoCreateSubnetworks: false
+
+- name: {{ subnet0 }}
+  type: compute.v1.subnetwork
+  properties:
+    ipCidrRange: 10.128.0.0/24
+    network: $(ref.{{ network }}.selfLink)
+    region: {{ region }}
+
+{# NETWORK #}
+
+{# FIREWALL #}
+
+- name: {{ common.GenerateUniqueName( 'fw-rule', env['deployment'], 'ssh' ) }}
+  type: compute.v1.firewall
+  properties:
+    network: $(ref.{{ network }}.selfLink)
+    sourceRanges: [ "0.0.0.0/0" ]
+    allowed:
+    - IPProtocol: TCP
+      ports: [ "22" ]
+
+- name: {{ common.GenerateUniqueName( 'fw-rule', env['deployment'], 'infra' ) }}
+  type: compute.v1.firewall
+  properties:
+    network: $(ref.{{ network }}.selfLink)
+    sourceRanges: [ "0.0.0.0/0" ]
+    targetTags: [ "testdrive-infra" ]
+    allowed:
+    - IPProtocol: TCP
+      ports: [ "80", "443" ]
+
+- name: {{ common.GenerateUniqueName( 'fw-rule', env['deployment'], 'master' ) }}
+  type: compute.v1.firewall
+  properties:
+    network: $(ref.{{ network }}.selfLink)
+    sourceRanges: [ "0.0.0.0/0" ]
+    targetTags: [ "testdrive-master" ]
+    allowed:
+    - IPProtocol: TCP
+      ports: [ "80", "443" ]
+
+- name: {{ common.GenerateUniqueName( 'fw-rule', env['deployment'], 'default' ) }}
+  type: compute.v1.firewall
+  properties:
+    network: $(ref.{{ network }}.selfLink)
+    sourceRanges: [ "10.128.0.0/16" ]
+    allowed:
+    - IPProtocol: TCP
+      ports: [ "0-65535" ]
+    - IPProtocol: UDP
+      ports: [ "0-65535" ]
+    - IPProtocol: ICMP
+
+{# FIREWALL #}
+
+{# INSTANCES #}
+
+- name: {{ diskinfra }}
+  type: compute.v1.disk
+  properties:
+    zone: {{ properties["zone"] }}
+    sizeGb: 20
+    type: https://www.googleapis.com/compute/v1/projects/{{ env["project"] }}/zones/{{ properties["zone"] }}/diskTypes/pd-ssd
+    sourceImage: {{ properties["image-infra-docker"] }}
+
+- name: {{ vminfra }}
+  type: compute.v1.instance
+  properties:
+    zone: {{ properties["zone"] }}
+    machineType: zones/{{ properties["zone"] }}/machineTypes/{{ properties['mtype-infra'] }}
+    metadata:
+      items:
+      - key: startup-script
+        value: |
+          #!/bin/bash
+          echo '10.128.0.4 {{ vmmaster }}.c.openshift-test-drive.internal {{ vmmaster }}' >> /etc/hosts
+          echo '10.128.0.3 {{ vmnfs }}.c.openshift-test-drive.internal {{ vmnfs }}' >> /etc/hosts
+          echo '10.128.0.5 {{ vmnode1 }}.c.openshift-test-drive.internal {{ vmnode1 }}' >> /etc/hosts
+          echo '10.128.0.8 {{ vmnode2 }}.c.openshift-test-drive.internal {{ vmnode2 }}' >> /etc/hosts
+    disks:
+    - deviceName: boot
+      type: PERSISTENT
+      boot: true
+      autoDelete: true
+      initializeParams:
+        diskName: {{ common.GenerateUniqueName( 'disk', env['deployment'], 'infra' ) }}
+        sourceImage: {{ properties["image-infra"] }}
+    - deviceName: infra-docker
+      type: PERSISTENT
+      autoDelete: true
+      source: $(ref.{{ diskinfra }}.selfLink)
+    networkInterfaces:
+    - network: $(ref.{{ network }}.selfLink)
+      subnetwork: $(ref.{{ subnet0 }}.selfLink)
+      networkIP: 10.128.0.2
+      accessConfigs:
+      - name: External NAT
+        type: ONE_TO_ONE_NAT
+    tags:
+      items:
+        - 'testdrive-infra'
+    serviceAccounts:
+    - email: default
+      scopes:
+        - 'https://www.googleapis.com/auth/compute'
+        - 'https://www.googleapis.com/auth/servicecontrol'
+        - 'https://www.googleapis.com/auth/service.management'
+        - 'https://www.googleapis.com/auth/logging.write'
+        - 'https://www.googleapis.com/auth/monitoring.write'
+        - 'https://www.googleapis.com/auth/trace.append'
+        - 'https://www.googleapis.com/auth/devstorage.read_only'
+        - 'https://www.googleapis.com/auth/userinfo.email'
+
+- name: {{ diskmaster }}
+  type: compute.v1.disk
+  properties:
+    zone: {{ properties["zone"] }}
+    sizeGb: 20
+    type: https://www.googleapis.com/compute/v1/projects/{{ env["project"] }}/zones/{{ properties["zone"] }}/diskTypes/pd-ssd
+    sourceImage: {{ properties["image-master-docker"] }}
+
+- name: {{ vmmaster }}
+  type: compute.v1.instance
+  properties:
+    zone: {{ properties["zone"] }}
+    machineType: zones/{{ properties["zone"] }}/machineTypes/{{ properties['mtype-master'] }}
+    metadata:
+      items:
+      - key: userPassword
+        value: $(ref.userPassword.string)
+      - key: randomString
+        value: $(ref.randomString.string)
+      - key: deploymentName
+        value: {{ env["deployment"] }}
+      - key: startup-script
+        value: |
+          #!/bin/bash
+          echo '10.128.0.2 {{ vminfra }}.c.openshift-test-drive.internal {{ vminfra }}' >> /etc/hosts
+          echo '10.128.0.3 {{ vmnfs }}.c.openshift-test-drive.internal {{ vmnfs }}' >> /etc/hosts
+          echo '10.128.0.5 {{ vmnode1 }}.c.openshift-test-drive.internal {{ vmnode1 }}' >> /etc/hosts
+          echo '10.128.0.8 {{ vmnode2 }}.c.openshift-test-drive.internal {{ vmnode2 }}' >> /etc/hosts
+          userPassword=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/userPassword)
+          randomString=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/randomString)
+          deploymentName=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/deploymentName)
+          randomDnsName=$randomString${deploymentName: -3:3}
+          sed "s/UNIQUE_SUBDOMAIN_PREFIX/$randomDnsName/g" /root/openshift-hosts.template > /root/openshift-hosts
+          ansible-playbook --ssh-common-args='-o StrictHostKeyChecking=no' -i /root/openshift-hosts /usr/share/ansible/openshift-ansible/playbooks/byo/config.yml
+          htpasswd -b /etc/origin/master/htpasswd developer $userPassword
+          gcloud beta runtime-config configs variables set success/success 'success' --config-name {{ configName }}
+          gcloud alpha deployment-manager runtime-configs variables set success/success 'success' --config-name {{ configName }}
+
+    disks:
+    - deviceName: boot
+      type: PERSISTENT
+      boot: true
+      autoDelete: true
+      initializeParams:
+        diskName: {{ common.GenerateUniqueName( 'disk', env['deployment'], 'master' ) }}
+        sourceImage: {{ properties["image-master"] }}
+    - deviceName: master-docker
+      type: PERSISTENT
+      autoDelete: true
+      source: $(ref.{{ diskmaster }}.selfLink)
+    networkInterfaces:
+    - network: $(ref.{{ network }}.selfLink)
+      subnetwork: $(ref.{{ subnet0 }}.selfLink)
+      networkIP: 10.128.0.4
+      accessConfigs:
+      - name: External NAT
+        type: ONE_TO_ONE_NAT
+    tags:
+      items:
+        - 'testdrive-master'
+    serviceAccounts:
+    - email: default
+      scopes:
+        - 'https://www.googleapis.com/auth/cloudruntimeconfig'
+        - 'https://www.googleapis.com/auth/compute'
+        - 'https://www.googleapis.com/auth/servicecontrol'
+        - 'https://www.googleapis.com/auth/service.management'
+        - 'https://www.googleapis.com/auth/logging.write'
+        - 'https://www.googleapis.com/auth/monitoring.write'
+        - 'https://www.googleapis.com/auth/trace.append'
+        - 'https://www.googleapis.com/auth/devstorage.read_only'
+        - 'https://www.googleapis.com/auth/userinfo.email'
+
+
+- name: {{ configName }}
+  type: runtimeconfig.v1beta1.config
+  properties:
+    config: {{ configName }}
+
+- name: {{ waiterName }}
+  type: runtimeconfig.v1beta1.waiter
+  metadata:
+    dependsOn:
+    - {{ vmmaster }}
+  properties:
+    parent: $(ref.{{ configName }}.name)
+    waiter: {{ waiterName }}
+    timeout: 1200s
+    success:
+      cardinality:
+        path: /success
+        number: 1
+    failure:
+      cardinality:
+        path: /failure
+        number: 1
+
+
+
+- name: {{ vmnfs }}
+  type: compute.v1.instance
+  properties:
+    zone: {{ properties["zone"] }}
+    machineType: zones/{{ properties["zone"] }}/machineTypes/{{ properties['mtype-nfs'] }}
+    metadata:
+      items:
+      - key: randomString
+        value: $(ref.randomString.string)
+      - key: deploymentName
+        value: {{ env["deployment"] }}
+      - key: startup-script
+        value: |
+          #!/bin/bash
+          dnszone=gcp-testdrive-openshift-com
+          randomString=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/randomString)
+          deploymentName=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/deploymentName)
+          randomDnsName=$randomString${deploymentName: -3:3}
+          gcloud --project='openshift-test-drive' dns record-sets transaction start -z=$dnszone
+          gcloud --project='openshift-test-drive' dns record-sets transaction add -z=$dnszone \
+                     --name="master.$randomDnsName.gcp.testdrive.openshift.com" --type=A --ttl=300 $(ref.{{ vmmaster }}.networkInterfaces[0].accessConfigs[0].natIP)
+          gcloud --project='openshift-test-drive' dns record-sets transaction add -z=$dnszone \
+                     --name="*.cloudapps.$randomDnsName.gcp.testdrive.openshift.com" --type=A --ttl=300 $(ref.{{ vminfra }}.networkInterfaces[0].accessConfigs[0].natIP) 
+          gcloud --project='openshift-test-drive' dns record-sets transaction execute -z=$dnszone
+          echo '10.128.0.4 {{ vmmaster }}.c.openshift-test-drive.internal {{ vmmaster }}' >> /etc/hosts
+          echo '10.128.0.2 {{ vminfra }}.c.openshift-test-drive.internal {{ vminfra }}' >> /etc/hosts
+          echo '10.128.0.5 {{ vmnode1 }}.c.openshift-test-drive.internal {{ vmnode1 }}' >> /etc/hosts
+          echo '10.128.0.8 {{ vmnode2 }}.c.openshift-test-drive.internal {{ vmnode2 }}' >> /etc/hosts
+      - key: shutdown-script
+        value: |
+          #!/bin/bash
+          dnszone=gcp-testdrive-openshift-com
+          randomString=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/randomString)
+          deploymentName=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/deploymentName)
+          randomDnsName=$randomString${deploymentName: -3:3}
+          gcloud --project='openshift-test-drive' dns record-sets transaction start -z=$dnszone
+          gcloud --project='openshift-test-drive' dns record-sets transaction remove -z=$dnszone \
+                     --name="master.$randomDnsName.gcp.testdrive.openshift.com" --type=A --ttl=300 $(ref.{{ vmmaster }}.networkInterfaces[0].accessConfigs[0].natIP)
+          gcloud --project='openshift-test-drive' dns record-sets transaction remove -z=$dnszone \
+                     --name="*.cloudapps.$randomDnsName.gcp.testdrive.openshift.com" --type=A --ttl=300 $(ref.{{ vminfra }}.networkInterfaces[0].accessConfigs[0].natIP) 
+          gcloud --project='openshift-test-drive' dns record-sets transaction execute -z=$dnszone
+    disks:
+    - deviceName: boot
+      type: PERSISTENT
+      boot: true
+      autoDelete: true
+      initializeParams:
+        diskName: {{ common.GenerateUniqueName( 'disk', env['deployment'], 'nfs' ) }}
+        sourceImage: {{ properties["image-nfs"] }}
+    networkInterfaces:
+    - network: $(ref.{{ network }}.selfLink)
+      subnetwork: $(ref.{{ subnet0 }}.selfLink)
+      networkIP: 10.128.0.3
+      accessConfigs:
+      - name: External NAT
+        type: ONE_TO_ONE_NAT
+    tags:
+      items:
+        - 'testdrive-nfs'
+    serviceAccounts:
+    - email: default
+      scopes:
+        - 'https://www.googleapis.com/auth/compute'
+        - 'https://www.googleapis.com/auth/servicecontrol'
+        - 'https://www.googleapis.com/auth/service.management'
+        - 'https://www.googleapis.com/auth/logging.write'
+        - 'https://www.googleapis.com/auth/monitoring.write'
+        - 'https://www.googleapis.com/auth/trace.append'
+        - 'https://www.googleapis.com/auth/devstorage.read_only'
+        - 'https://www.googleapis.com/auth/userinfo.email'
+        - 'https://www.googleapis.com/auth/cloud-platform'
+
+- name: {{ vmnode1 }}
+  type: compute.v1.instance
+  properties:
+    zone: {{ properties["zone"] }}
+    machineType: zones/{{ properties["zone"] }}/machineTypes/{{ properties['mtype-node'] }}
+    metadata:
+      items:
+      - key: startup-script
+        value: |
+          #!/bin/bash
+          echo '10.128.0.4 {{ vmmaster }}.c.openshift-test-drive.internal {{ vmmaster }}' >> /etc/hosts
+          echo '10.128.0.2 {{ vminfra }}.c.openshift-test-drive.internal {{ vminfra }}' >> /etc/hosts
+          echo '10.128.0.3 {{ vmnfs }}.c.openshift-test-drive.internal {{ vmnfs }}' >> /etc/hosts
+          echo '10.128.0.8 {{ vmnode2 }}.c.openshift-test-drive.internal {{ vmnode2 }}' >> /etc/hosts
+    disks:
+    - deviceName: boot
+      type: PERSISTENT
+      boot: true
+      autoDelete: true
+      initializeParams:
+        diskName: {{ common.GenerateUniqueName( 'disk', env['deployment'], 'node1' ) }}
+        sourceImage: {{ properties["image-node1"] }}
+    networkInterfaces:
+    - network: $(ref.{{ network }}.selfLink)
+      subnetwork: $(ref.{{ subnet0 }}.selfLink)
+      networkIP: 10.128.0.5
+      accessConfigs:
+      - name: External NAT
+        type: ONE_TO_ONE_NAT
+    tags:
+      items:
+        - 'testdrive-node'
+    serviceAccounts:
+    - email: default
+      scopes:
+        - 'https://www.googleapis.com/auth/compute'
+        - 'https://www.googleapis.com/auth/servicecontrol'
+        - 'https://www.googleapis.com/auth/service.management'
+        - 'https://www.googleapis.com/auth/logging.write'
+        - 'https://www.googleapis.com/auth/monitoring.write'
+        - 'https://www.googleapis.com/auth/trace.append'
+        - 'https://www.googleapis.com/auth/devstorage.read_only'
+        - 'https://www.googleapis.com/auth/userinfo.email'
+
+- name: {{ vmnode2 }}
+  type: compute.v1.instance
+  properties:
+    zone: {{ properties["zone"] }}
+    machineType: zones/{{ properties["zone"] }}/machineTypes/{{ properties['mtype-node'] }}
+    metadata:
+      items:
+      - key: startup-script
+        value: |
+          #!/bin/bash
+          echo '10.128.0.4 {{ vmmaster }}.c.openshift-test-drive.internal {{ vmmaster }}' >> /etc/hosts
+          echo '10.128.0.2 {{ vminfra }}.c.openshift-test-drive.internal {{ vminfra }}' >> /etc/hosts
+          echo '10.128.0.3 {{ vmnfs }}.c.openshift-test-drive.internal {{ vmnfs }}' >> /etc/hosts
+          echo '10.128.0.5 {{ vmnode1 }}.c.openshift-test-drive.internal {{ vmnode1 }}' >> /etc/hosts
+    disks:
+    - deviceName: boot
+      type: PERSISTENT
+      boot: true
+      autoDelete: true
+      initializeParams:
+        diskName: {{ common.GenerateUniqueName( 'disk', env['deployment'], 'node2' ) }}
+        sourceImage: {{ properties["image-node2"] }}
+    networkInterfaces:
+    - network: $(ref.{{ network }}.selfLink)
+      subnetwork: $(ref.{{ subnet0 }}.selfLink)
+      networkIP: 10.128.0.8
+      accessConfigs:
+      - name: External NAT
+        type: ONE_TO_ONE_NAT
+    tags:
+      items:
+        - 'testdrive-node'
+    serviceAccounts:
+    - email: default
+      scopes:
+        - 'https://www.googleapis.com/auth/compute'
+        - 'https://www.googleapis.com/auth/servicecontrol'
+        - 'https://www.googleapis.com/auth/service.management'
+        - 'https://www.googleapis.com/auth/logging.write'
+        - 'https://www.googleapis.com/auth/monitoring.write'
+        - 'https://www.googleapis.com/auth/trace.append'
+        - 'https://www.googleapis.com/auth/devstorage.read_only'
+        - 'https://www.googleapis.com/auth/userinfo.email'
+
+{# INSTANCES #}
+
+- name: randomString
+  type: helpers-random-string.py
+  properties:
+    length: 3
+
+- name: userPassword
+  type: helpers-random-string.py
+  properties:
+    length: 10
+
+outputs:
+- name: OpenShiftConsole
+  value: https://master.$(ref.randomString.string){{ dnsdeploymentpart }}.gcp.testdrive.openshift.com
+- name: user
+  value: developer
+- name: password
+  value: $(ref.userPassword.string)
+

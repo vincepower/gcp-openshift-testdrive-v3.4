@@ -1,0 +1,123 @@
+# vim: set ft=ansible:
+---
+- name: Subscriptions
+  hosts:
+    - "tag_testdrive-master"
+    - "tag_testdrive-node1"
+    - "tag_testdrive-node2"
+    - "tag_testdrive-infra"
+    - "tag_testdrive-nfs"
+  vars:
+    repo_version: "3.4"
+    env_type: "bu-workshop"
+  tags:
+    - repos
+  tasks:
+    - name: create open repo template on host
+      template:
+        src: "repos_template.j2"
+        dest: /etc/yum.repos.d/open_{{ env_type }}.repo
+      tags:
+        - create_open_repo_template
+    - name: clean repositories
+      shell: "yum clean all"
+      tags:
+        - configure_repos
+        - run_yum_repolist
+
+- name: Common packages
+  hosts:
+    - "tag_testdrive-master"
+    - "tag_testdrive-node1"
+    - "tag_testdrive-node2"
+    - "tag_testdrive-infra"
+    - "tag_testdrive-nfs"
+  tags:
+    - common_packages
+  tasks:
+    - name: "Install common software"
+      yum:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - python
+        - unzip
+        - bash-completion
+        - tmux
+        - bind-utils
+        - wget
+        - ansible
+        - git
+        - vim-enhanced
+
+
+- name: Configure /etc/hosts files
+  hosts:
+    - "tag_testdrive-nfs"
+    - "tag_testdrive-master"
+    - "tag_testdrive-node1"
+    - "tag_testdrive-node2"
+    - "tag_testdrive-infra"
+  tags:
+    - configure_node_hosts
+  tasks:  
+    - name: Add mappings to /etc/hosts
+      blockinfile:
+        dest: /etc/hosts
+        marker: "\n# {mark} ANSIBLE MANAGED BLOCK"
+        block: |
+          10.128.0.4  master.c.openshift-test-drive.internal
+          10.128.0.2  infra.c.openshift-test-drive.internal
+          10.128.0.3  nfs.c.openshift-test-drive.internal
+          10.128.0.5  node1.c.openshift-test-drive.internal
+          10.128.0.8  node2.c.openshift-test-drive.internal
+        backup: yes
+    
+- name: Configure installer on master
+  hosts:
+    - "tag_testdrive-master"
+  vars_files:
+    - "setup_vars.yml"
+  tags:
+    - configure_installer
+  tasks:
+    - name: Create root .ssh folder
+      file:
+        dest: "/root/.ssh"
+        mode: 0700
+        state: directory
+
+    - name: Deploy keyfile as id_rsa
+      copy:
+        src: "{{ keyfile }}"
+        dest: "/root/.ssh/id_rsa"
+        mode: 0600
+
+    - name: Create OpenShift installation hosts file
+      template:
+        src: "hosts_template.j2"
+        dest: "/root/openshift-hosts"
+
+- name: Configure nodes
+  hosts:
+    - "tag_testdrive-master"
+    - "tag_testdrive-node1"
+    - "tag_testdrive-node2"
+    - "tag_testdrive-infra"
+  tags:
+    - configure_nodes
+  vars_files:
+    - "setup_vars.yml"
+  roles:
+    - "openshift-node"
+
+- name: Configure master to provision
+  hosts:
+    - "tag_testdrive-master"
+  vars_files:
+    - "setup_vars.yml"
+  tags:
+    - configure_master_for_install
+  roles:
+    - "openshift-provisioner"
+
