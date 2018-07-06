@@ -1,4 +1,4 @@
-# Google Cloud Platform OpenShift TestDrive
+# Google Cloud Platform OpenShift TestDrive for v3.4
 
 The following describes how to create the GCP OpenShift TestDrive.
 
