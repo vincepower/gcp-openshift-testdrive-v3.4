@@ -52,5 +52,5 @@ This command will
 2. run the OpenShift installer
 3. create a developer user with random password
 ```
-gcloud --project openshift-test-drive deployment-manager deployments create <unique-gcp-instance-name> --config install.jinja
+gcloud --project openshift-test-drive deployment-manager deployments create <unique-gcp-instance-name> --template install.jinja
 ```
